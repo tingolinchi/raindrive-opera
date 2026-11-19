@@ -110,21 +110,28 @@ def build_frame(out_dir, stamp, url, rows, cols):
         raise ValueError(f"fotograma casi vacío ({nodata_pct:.1f} % sin dato): no se publica")
     grid = oc.resample(code, rows, cols)
     tl = oc.tiles(grid)
-    tmp = os.path.join(out_dir, "f", stamp + ".tmp")
-    final = os.path.join(out_dir, "f", stamp)
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(tmp)
-    for (r, c), tile in tl.items():
-        with open(os.path.join(tmp, oc.tile_name(r, c) + ".png"), "wb") as fh:
-            fh.write(png_bytes(tile))
-    shutil.rmtree(final, ignore_errors=True)
-    os.rename(tmp, final)
+    tl2 = oc.tiles(oc.coarsen(grid), oc.COARSE_TILE_PX)
+    # f/ = teselas finas, g/ = teselas gruesas (vista general). Se escriben en carpetas temporales y se renombran al final.
+    pending = []
+    for level, tiles_ in (("f", tl), ("g", tl2)):
+        tmp = os.path.join(out_dir, level, stamp + ".tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        for (r, c), tile in tiles_.items():
+            with open(os.path.join(tmp, oc.tile_name(r, c) + ".png"), "wb") as fh:
+                fh.write(png_bytes(tile))
+        pending.append((tmp, os.path.join(out_dir, level, stamp)))
+    for tmp, final in pending:
+        shutil.rmtree(final, ignore_errors=True)
+        os.rename(tmp, final)
     return {"t": t.strftime("%Y-%m-%dT%H:%M:00Z"), "stamp": stamp, "tiles": sorted(oc.tile_name(r, c) for (r, c) in tl),
+            "tiles2": sorted(oc.tile_name(r, c) for (r, c) in tl2),
             "nodata_pct": round(nodata_pct, 1), "echo_pct": round(echo_pct, 2)}
 
 
 def main(out_dir):
     os.makedirs(os.path.join(out_dir, "f"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "g"), exist_ok=True)
     links = latest_links()
     if not links:
         sys.exit("La API no devolvió ningún compuesto reciente: no se publica nada.")
@@ -133,7 +140,8 @@ def main(out_dir):
     prev = {}
     try:
         for fr in json.load(open(os.path.join(out_dir, "meta.json")))["frames"]:
-            if os.path.isdir(os.path.join(out_dir, "f", fr["stamp"])):
+            # Solo se reutilizan los fotogramas completos (teselas finas y gruesas); los de la versión anterior se rehacen.
+            if "tiles2" in fr and all(os.path.isdir(os.path.join(out_dir, lv, fr["stamp"])) for lv in ("f", "g")):
                 prev[fr["stamp"]] = fr
     except (OSError, ValueError, KeyError):
         pass
@@ -151,9 +159,10 @@ def main(out_dir):
             errors.append(f"{stamp}: {e}")
             print("  FALLO", stamp, e)
     keep = {fr["stamp"] for fr in frames}
-    for name in os.listdir(os.path.join(out_dir, "f")):
-        if name not in keep:
-            shutil.rmtree(os.path.join(out_dir, "f", name), ignore_errors=True)
+    for level in ("f", "g"):
+        for name in os.listdir(os.path.join(out_dir, level)):
+            if name not in keep:
+                shutil.rmtree(os.path.join(out_dir, level, name), ignore_errors=True)
     if not frames:
         sys.exit("Ningún fotograma válido: no se publica. Errores: " + "; ".join(errors))
     frames.sort(key=lambda f: f["stamp"])
@@ -164,6 +173,8 @@ def main(out_dir):
         "step_minutes": STEP_MIN,
         "grid": {"lon_w": oc.LON_W, "lat_n": oc.LAT_N, "lon_e": oc.LON_E, "lat_s": oc.LAT_S,
                  "res_deg": oc.RES_DEG, "tile_deg": oc.TILE_DEG, "tile_px": oc.TILE_PX},
+        "grid2": {"lon_w": oc.LON_W, "lat_n": oc.LAT_N, "lon_e": oc.LON_E, "lat_s": oc.LAT_S,
+                  "res_deg": oc.COARSE_RES_DEG, "tile_deg": oc.COARSE_TILE_DEG, "tile_px": oc.COARSE_TILE_PX, "path": "g"},
         "encoding": {"nodata": oc.CODE_NODATA, "no_echo": oc.CODE_NOECHO, "dbz_formula": "(v-2)*0.5-8", "min_dbz": oc.ECHO_FLOOR_DBZ, "max_dbz": oc.ECHO_CEIL_DBZ},
         "frames": frames,
         "errors": errors,

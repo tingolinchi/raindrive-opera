@@ -32,6 +32,12 @@ ECHO_FLOOR_DBZ = 0.0   # por debajo: "sin eco" (ruido)
 ECHO_CEIL_DBZ = 70.0   # por encima: se recorta (probables interferencias o granizo extremo)
 CODE_NODATA, CODE_NOECHO = 0, 1
 
+# Nivel grueso (vista general): misma zona y mismos códigos, a 0,05° y teselas de 10° x 10° (200 x 200 px).
+COARSE_TILE_DEG = 10
+COARSE_RES_DEG = 0.05
+COARSE_TILE_PX = int(round(COARSE_TILE_DEG / COARSE_RES_DEG))  # 200
+COARSE_RATIO = COARSE_RES_DEG / RES_DEG                        # 2,5 píxeles finos por píxel grueso
+
 
 def _q(sin_phi):
     e = math.sqrt(E2)
@@ -112,15 +118,38 @@ def resample(code, rows, cols):
     return out
 
 
-def tiles(grid):
-    """Parte la rejilla de salida en teselas TILE_PX x TILE_PX. Devuelve {(fila_tesela, col_tesela): matriz}. Omite las 100 % sin dato."""
+def tiles(grid, tile_px=TILE_PX):
+    """Parte la rejilla de salida en teselas tile_px x tile_px. Devuelve {(fila_tesela, col_tesela): matriz}. Omite las 100 % sin dato."""
     res = {}
-    for r in range(grid.shape[0] // TILE_PX):
-        for c in range(grid.shape[1] // TILE_PX):
-            t = grid[r * TILE_PX:(r + 1) * TILE_PX, c * TILE_PX:(c + 1) * TILE_PX]
+    for r in range(grid.shape[0] // tile_px):
+        for c in range(grid.shape[1] // tile_px):
+            t = grid[r * tile_px:(r + 1) * tile_px, c * tile_px:(c + 1) * tile_px]
             if (t != CODE_NODATA).any():
                 res[(r, c)] = t
     return res
+
+
+def _edges(n_out, ratio):
+    return np.rint(np.arange(n_out + 1) * ratio).astype(np.int64)
+
+
+def coarsen(grid, ratio=COARSE_RATIO):
+    """Reduce la rejilla fina a la gruesa (bloques de `ratio` x `ratio` píxeles; con 2,5 los bloques miden 2 o 3).
+    Regla de cada bloque (la misma que sigue la app: nunca se inventa un "seco"):
+      - si la mitad o más de sus píxeles son SIN DATO, el resultado es SIN DATO;
+      - si no, el máximo del bloque (el eco más fuerte; si no hay eco, "cubierto sin eco")."""
+    h, w = grid.shape
+    ho, wo = int(round(h / ratio)), int(round(w / ratio))
+    er, ec = _edges(ho, ratio), _edges(wo, ratio)
+    if er[-1] != h or ec[-1] != w:
+        raise ValueError("la rejilla fina no es múltiplo exacto de la gruesa")
+    mx = np.maximum.reduceat(np.maximum.reduceat(grid, er[:-1], axis=0), ec[:-1], axis=1)
+    nd = (grid == CODE_NODATA).astype(np.uint32)
+    cnt = np.add.reduceat(np.add.reduceat(nd, er[:-1], axis=0), ec[:-1], axis=1)
+    size = np.diff(er)[:, None] * np.diff(ec)[None, :]
+    out = mx.copy()
+    out[cnt * 2 >= size] = CODE_NODATA
+    return out.astype(np.uint8)
 
 
 def tile_name(r, c):
