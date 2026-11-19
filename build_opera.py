@@ -112,6 +112,14 @@ def build_frame(out_dir, stamp, url, rows, cols):
     tl = oc.tiles(grid)
     tl2 = oc.tiles(oc.coarsen(grid), oc.COARSE_TILE_PX)
     # f/ = teselas finas, g/ = teselas gruesas (vista general). Se escriben en carpetas temporales y se renombran al final.
+    # o/ = imagen resumen de toda Europa ya coloreada (WebP sin pérdida), para la vista general de la app.
+    ov_dir = os.path.join(out_dir, "o")
+    os.makedirs(ov_dir, exist_ok=True)
+    ov_tmp = os.path.join(ov_dir, stamp + ".webp.tmp")
+    buf = io.BytesIO()
+    Image.fromarray(oc.overview_rgba(oc.coarsen(grid)), mode="RGBA").save(buf, format="WEBP", lossless=True, quality=100, method=4)
+    with open(ov_tmp, "wb") as fh:
+        fh.write(buf.getvalue())
     pending = []
     for level, tiles_ in (("f", tl), ("g", tl2)):
         tmp = os.path.join(out_dir, level, stamp + ".tmp")
@@ -124,14 +132,16 @@ def build_frame(out_dir, stamp, url, rows, cols):
     for tmp, final in pending:
         shutil.rmtree(final, ignore_errors=True)
         os.rename(tmp, final)
+    os.replace(ov_tmp, os.path.join(ov_dir, stamp + ".webp"))
     return {"t": t.strftime("%Y-%m-%dT%H:%M:00Z"), "stamp": stamp, "tiles": sorted(oc.tile_name(r, c) for (r, c) in tl),
-            "tiles2": sorted(oc.tile_name(r, c) for (r, c) in tl2),
+            "tiles2": sorted(oc.tile_name(r, c) for (r, c) in tl2), "ov": True,
             "nodata_pct": round(nodata_pct, 1), "echo_pct": round(echo_pct, 2)}
 
 
 def main(out_dir):
     os.makedirs(os.path.join(out_dir, "f"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "g"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "o"), exist_ok=True)
     links = latest_links()
     if not links:
         sys.exit("La API no devolvió ningún compuesto reciente: no se publica nada.")
@@ -141,7 +151,8 @@ def main(out_dir):
     try:
         for fr in json.load(open(os.path.join(out_dir, "meta.json")))["frames"]:
             # Solo se reutilizan los fotogramas completos (teselas finas y gruesas); los de la versión anterior se rehacen.
-            if "tiles2" in fr and all(os.path.isdir(os.path.join(out_dir, lv, fr["stamp"])) for lv in ("f", "g")):
+            if fr.get("ov") and all(os.path.isdir(os.path.join(out_dir, lv, fr["stamp"])) for lv in ("f", "g")) \
+                    and os.path.isfile(os.path.join(out_dir, "o", fr["stamp"] + ".webp")):
                 prev[fr["stamp"]] = fr
     except (OSError, ValueError, KeyError):
         pass
@@ -163,6 +174,10 @@ def main(out_dir):
         for name in os.listdir(os.path.join(out_dir, level)):
             if name not in keep:
                 shutil.rmtree(os.path.join(out_dir, level, name), ignore_errors=True)
+    for name in os.listdir(os.path.join(out_dir, "o")):
+        if name[:-len(".webp")] not in keep:
+            try: os.remove(os.path.join(out_dir, "o", name))
+            except OSError: pass
     if not frames:
         sys.exit("Ningún fotograma válido: no se publica. Errores: " + "; ".join(errors))
     frames.sort(key=lambda f: f["stamp"])
@@ -175,6 +190,9 @@ def main(out_dir):
                  "res_deg": oc.RES_DEG, "tile_deg": oc.TILE_DEG, "tile_px": oc.TILE_PX},
         "grid2": {"lon_w": oc.LON_W, "lat_n": oc.LAT_N, "lon_e": oc.LON_E, "lat_s": oc.LAT_S,
                   "res_deg": oc.COARSE_RES_DEG, "tile_deg": oc.COARSE_TILE_DEG, "tile_px": oc.COARSE_TILE_PX, "path": "g"},
+        # Imagen resumen coloreada (Mercator), un WebP por fotograma en o/<stamp>.webp, entre estas esquinas.
+        "overview": {"lon_w": oc.LON_W, "lat_n": oc.LAT_N, "lon_e": oc.LON_E, "lat_s": oc.LAT_S,
+                     "width": oc.overview_size()[0], "height": oc.overview_size()[1], "path": "o", "ext": "webp"},
         "encoding": {"nodata": oc.CODE_NODATA, "no_echo": oc.CODE_NOECHO, "dbz_formula": "(v-2)*0.5-8", "min_dbz": oc.ECHO_FLOOR_DBZ, "max_dbz": oc.ECHO_CEIL_DBZ},
         "frames": frames,
         "errors": errors,

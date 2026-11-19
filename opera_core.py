@@ -168,3 +168,66 @@ def decode_dbz(code):
     """Código -> dBZ (float; NaN si sin dato o sin eco)."""
     c = np.asarray(code, dtype=np.float64)
     return np.where(c >= 2, (c - 2) * 0.5 - 8.0, np.nan)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Imagen resumen (vista de toda Europa): una sola imagen RGBA por fotograma, ya coloreada, en proyección Mercator (la que usa
+# Google Maps para colocar una imagen entre dos esquinas). La app solo la baja y la escala; no calcula nada.
+# Misma paleta, mismo suavizado y misma opacidad que EuMosaic.kt / RadarPalette.kt de la app.
+# ---------------------------------------------------------------------------------------------------------------------
+OV_WIDTH = 1200                # píxeles de ancho de la imagen resumen (todo el ancho de la rejilla, 70°)
+OV_ALPHA = 0xD2
+OV_EDGE_LO, OV_EDGE_HI = 11.0, 13.0
+BACKGROUND_DBZ = 9.0           # dBZ que se da a "cubierto sin eco" al suavizar (RadarSmoothRenderer.BACKGROUND_DBZ)
+OV_NODATA_RGBA = (0x6E, 0x6E, 0x6E, 0x44)   # RadarSmoothRenderer.NO_DATA_ARGB
+OV_PALETTE = [0x0000FC, 0x0094FC, 0x00FCFC, 0x438323, 0x00C000, 0x00FF00, 0xFFFF00, 0xFFBB00, 0xFF7F00, 0xFF0000, 0xC8005A]  # desde 12 dBZ, tramos de 6
+
+
+def _merc(lat_deg):
+    return np.log(np.tan(np.pi / 4 + np.radians(lat_deg) / 2))
+
+
+def _inv_merc(y):
+    return np.degrees(2 * np.arctan(np.exp(y)) - np.pi / 2)
+
+
+def overview_size(width=OV_WIDTH):
+    """(ancho, alto) de la imagen resumen: el alto sale de la proyección Mercator de la rejilla."""
+    dx = math.radians(LON_E - LON_W)
+    dy = float(_merc(LAT_N) - _merc(LAT_S))
+    return width, int(round(width * dy / dx))
+
+
+def overview_rgba(coarse, width=OV_WIDTH):
+    """Rejilla gruesa de códigos (filas = latitud, fila 0 = norte) -> matriz RGBA uint8 (alto, ancho, 4) en Mercator.
+    - Fuera de cobertura (SIN DATO o junto a su borde): gris translúcido, nunca transparente ("seco").
+    - Cubierto sin eco o por debajo de 11 dBZ: transparente. Entre 11 y 13 dBZ: aparece poco a poco; desde 13: opacidad OV_ALPHA."""
+    gh, gw = coarse.shape
+    w, h = overview_size(width)
+    c = coarse.astype(np.float32)
+    f = np.where(c >= 2, (c - 2) * 0.5 - 8.0, np.where(c == CODE_NOECHO, BACKGROUND_DBZ, np.nan)).astype(np.float32)
+    # Centro de cada píxel de salida -> posición en la rejilla gruesa (mismas fórmulas que EuGrid.smoothDbzOrNaN)
+    yN, yS = _merc(LAT_N), _merc(LAT_S)
+    lat = _inv_merc(yN - (np.arange(h) + 0.5) / h * (yN - yS))
+    lon = LON_W + (np.arange(w) + 0.5) / w * (LON_E - LON_W)
+    fy = (LAT_N - lat) / COARSE_RES_DEG - 0.5
+    fx = (lon - LON_W) / COARSE_RES_DEG - 0.5
+    y0 = np.floor(fy).astype(np.int64); x0 = np.floor(fx).astype(np.int64)
+    ty = (fy - y0).astype(np.float32)[:, None]; tx = (fx - x0).astype(np.float32)[None, :]
+    y0c, y1c = np.clip(y0, 0, gh - 1), np.clip(y0 + 1, 0, gh - 1)
+    x0c, x1c = np.clip(x0, 0, gw - 1), np.clip(x0 + 1, 0, gw - 1)
+    a = f[np.ix_(y0c, x0c)]; b = f[np.ix_(y0c, x1c)]; cc = f[np.ix_(y1c, x0c)]; d = f[np.ix_(y1c, x1c)]
+    v = (a * (1 - tx) + b * tx) * (1 - ty) + (cc * (1 - tx) + d * tx) * ty     # NaN si algún vecino es SIN DATO
+    out = np.zeros((h, w, 4), dtype=np.uint8)
+    nod = np.isnan(v)
+    out[nod] = OV_NODATA_RGBA
+    ok = ~nod & (v > OV_EDGE_LO)
+    idx = np.clip(np.floor((np.maximum(np.nan_to_num(v, nan=0.0), 12.0) - 12.0) / 6.0).astype(np.int64), 0, len(OV_PALETTE) - 1)
+    pal = np.array([[(p >> 16) & 255, (p >> 8) & 255, p & 255] for p in OV_PALETTE], dtype=np.uint8)
+    vv = np.nan_to_num(v, nan=0.0)
+    alpha = np.where(vv >= OV_EDGE_HI, float(OV_ALPHA), OV_ALPHA * (vv - OV_EDGE_LO) / (OV_EDGE_HI - OV_EDGE_LO))
+    alpha = np.where(ok, alpha, 0).astype(np.int64)     # int() como en Kotlin (trunca)
+    px = ok & (alpha > 0)
+    out[px, :3] = pal[idx[px]]
+    out[px, 3] = alpha[px].astype(np.uint8)
+    return out
